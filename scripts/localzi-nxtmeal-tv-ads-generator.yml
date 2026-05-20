@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation stack for localzi-nxtmeal-tv-ads-generator Lambda
+
+####---------------------------------------------####
+## Parameters::
+####---------------------------------------------####
+Parameters:
+    Environment:
+        Type: String
+        Description: Select the appropriate environment for deployment
+        AllowedValues:
+            - test
+            - prod
+        Default: test
+
+    LambdaFunctionName:
+        Type: String
+        Description: Name for the Lambda function
+        Default: localzi-nxtmeal-tv-ads-generator-lambda
+
+    TvAdsTableName:
+        Type: String
+        Description: DynamoDB table for TV Ads generation records
+        Default: localzi-nxtmeal-tv-ads
+
+    SlidesBucketName:
+        Type: String
+        Description: S3 bucket for slide templates
+        Default: localzi-nxtmeal-tv-ads-slides
+
+    OutputBucketName:
+        Type: String
+        Description: S3 bucket for generated video output
+        Default: localzi-nxtmeal-tv-ads-output
+
+    CdnBaseUrl:
+        Type: String
+        Description: CloudFront CDN base URL
+        Default: https://d2nahbmqd5vvug.cloudfront.net
+
+    FfmpegLayerArn:
+        Type: String
+        Description: ARN of the FFmpeg Lambda Layer
+        Default: ""
+
+####---------------------------------------------####
+## Conditions::
+####---------------------------------------------####
+Conditions:
+    IsPROD: !Equals
+        - !Ref Environment
+        - prod
+    HasFfmpegLayer: !Not
+        - !Equals
+            - !Ref FfmpegLayerArn
+            - ""
+
+####---------------------------------------------####
+## Resources::
+####---------------------------------------------####
+Resources:
+    ##---------------------------------------------
+    # DynamoDB Table - TV Ads Records
+    TvAdsTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            AttributeDefinitions:
+                - AttributeName: subLocationID
+                  AttributeType: S
+                - AttributeName: generatedAt
+                  AttributeType: S
+            KeySchema:
+                - AttributeName: subLocationID
+                  KeyType: HASH
+                - AttributeName: generatedAt
+                  KeyType: RANGE
+            BillingMode: PAY_PER_REQUEST
+            TableName: !Join ["", [!Ref TvAdsTableName, "-", !Ref Environment]]
+
+    ##---------------------------------------------
+    # S3 Bucket - Slide Templates
+    SlidesBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Join ["", [!Ref SlidesBucketName, "-", !Ref Environment]]
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+
+    ##---------------------------------------------
+    # S3 Bucket - Video Output
+    OutputBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Join ["", [!Ref OutputBucketName, "-", !Ref Environment]]
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            LifecycleConfiguration:
+                Rules:
+                    - Id: DeleteOldVideos
+                      Status: Enabled
+                      ExpirationInDays: 30
+
+    ##---------------------------------------------
+    # IAM Role for Lambda
+    LambdaExecutionRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Join ["", [!Ref LambdaFunctionName, "-role-", !Ref Environment]]
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: lambda.amazonaws.com
+                      Action: sts:AssumeRole
+            Policies:
+                - PolicyName: !Join ["", [!Ref LambdaFunctionName, "-policy-", !Ref Environment]]
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          # CloudWatch Logs
+                          - Effect: Allow
+                            Action:
+                                - logs:CreateLogGroup
+                                - logs:CreateLogStream
+                                - logs:PutLogEvents
+                            Resource: "arn:aws:logs:*:*:*"
+
+                          # DynamoDB - TV Ads table
+                          - Effect: Allow
+                            Action:
+                                - dynamodb:PutItem
+                                - dynamodb:Query
+                                - dynamodb:GetItem
+                            Resource:
+                                - !GetAtt TvAdsTable.Arn
+
+                          # DynamoDB - Read clients and menus (existing tables)
+                          - Effect: Allow
+                            Action:
+                                - dynamodb:Query
+                                - dynamodb:GetItem
+                                - dynamodb:Scan
+                            Resource:
+                                - !If
+                                    - IsPROD
+                                    - "arn:aws:dynamodb:ap-south-1:*:table/localzi-nxtmeal-octopus-serving-client-prod*"
+                                    - "arn:aws:dynamodb:ap-south-1:*:table/localzi-nxtmeal-octopus-serving-client-test*"
+                                - !If
+                                    - IsPROD
+                                    - "arn:aws:dynamodb:ap-south-1:*:table/localzi-nxtmeal-octopus-serving-menu-prod*"
+                                    - "arn:aws:dynamodb:ap-south-1:*:table/localzi-nxtmeal-octopus-serving-menu-test*"
+
+                          # S3 - Read templates
+                          - Effect: Allow
+                            Action:
+                                - s3:GetObject
+                                - s3:ListBucket
+                            Resource:
+                                - !GetAtt SlidesBucket.Arn
+                                - !Join ["", [!GetAtt SlidesBucket.Arn, "/*"]]
+
+                          # S3 - Write output videos
+                          - Effect: Allow
+                            Action:
+                                - s3:PutObject
+                                - s3:GetObject
+                            Resource:
+                                - !GetAtt OutputBucket.Arn
+                                - !Join ["", [!GetAtt OutputBucket.Arn, "/*"]]
+
+    ##---------------------------------------------
+    # Lambda Function
+    TvAdsGeneratorLambda:
+        Type: AWS::Lambda::Function
+        Properties:
+            FunctionName: !Join ["", [!Ref LambdaFunctionName, "-", !Ref Environment]]
+            Runtime: nodejs18.x
+            Handler: index.handler
+            Role: !GetAtt LambdaExecutionRole.Arn
+            Timeout: 900
+            MemorySize: 1024
+            EphemeralStorage:
+                Size: 1024
+            Layers: !If
+                - HasFfmpegLayer
+                - - !Ref FfmpegLayerArn
+                - !Ref "AWS::NoValue"
+            Environment:
+                Variables:
+                    ENVIRONMENT: !If [IsPROD, "PRODUCTION", "DEVELOPMENT"]
+                    CDN_BASE_URL: !Ref CdnBaseUrl
+                    FFMPEG_PATH: /opt/bin/ffmpeg
+            Code:
+                S3Bucket: !If
+                    - IsPROD
+                    - localzi-homeal-lambda-functions-prod
+                    - localzi-homeal-lambda-functions-test
+                Key: !Join ["", [!Ref LambdaFunctionName, "-", !Ref Environment, ".zip"]]
+
+####---------------------------------------------####
+## Outputs::
+####---------------------------------------------####
+Outputs:
+    LambdaFunctionArn:
+        Description: ARN of the TV Ads Generator Lambda
+        Value: !GetAtt TvAdsGeneratorLambda.Arn
+
+    TvAdsTableArn:
+        Description: ARN of the TV Ads DynamoDB table
+        Value: !GetAtt TvAdsTable.Arn
+
+    SlidesBucketArn:
+        Description: ARN of the slides template bucket
+        Value: !GetAtt SlidesBucket.Arn
+
+    OutputBucketArn:
+        Description: ARN of the video output bucket
+        Value: !GetAtt OutputBucket.Arn

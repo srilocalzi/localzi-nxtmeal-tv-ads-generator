@@ -1,0 +1,19 @@
+{
+  "name": "localzi-nxtmeal-tv-ads-generator",
+  "version": "1.0.0",
+  "description": "TV Ads video generator - composes menu data onto slide templates and generates MP4",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha test/**/*.test.js --timeout 30000",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1472.0",
+    "sharp": "^0.33.2"
+  },
+  "devDependencies": {
+    "mocha": "^10.2.0",
+    "chai": "^4.3.10",
+    "sinon": "^17.0.1"
+  }
+}
