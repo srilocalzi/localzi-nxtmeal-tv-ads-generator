@@ -3,15 +3,20 @@ const getEnvironment = () => (process.env.ENVIRONMENT || "DEVELOPMENT").toUpperC
 const isProd = () => getEnvironment() === "PRODUCTION";
 
 // ── DynamoDB Table Names ──
-const getClientTableName = () =>
+const getClientsTableName = () =>
   isProd()
-    ? "localzi-nxtmeal-octopus-serving-client-prod"
-    : "localzi-nxtmeal-octopus-serving-client-test";
+    ? "localzi-nxtmeal-octopus-clients-prod"
+    : "localzi-nxtmeal-octopus-clients-test";
 
-const getMenuTableName = () =>
+const getDailyMenusTableName = () =>
   isProd()
-    ? "localzi-nxtmeal-octopus-serving-menu-prod"
-    : "localzi-nxtmeal-octopus-serving-menu-test";
+    ? "localzi-nxtmeal-octopus-daily-menus-prod"
+    : "localzi-nxtmeal-octopus-daily-menus-test";
+
+const getQsrMenusTableName = () =>
+  isProd()
+    ? "localzi-nxtmeal-qsr-menus-prod"
+    : "localzi-nxtmeal-qsr-menus-test";
 
 const getTvAdsTableName = () =>
   isProd()
@@ -51,8 +56,9 @@ const response = (statusCode, body) => ({
 module.exports = {
   getEnvironment,
   isProd,
-  getClientTableName,
-  getMenuTableName,
+  getClientsTableName,
+  getDailyMenusTableName,
+  getQsrMenusTableName,
   getTvAdsTableName,
   getSlidesBucketName,
   getOutputBucketName,
