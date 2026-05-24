@@ -83,8 +83,8 @@ async function getDailyMenus(clientID, date, menuType) {
     items = items.filter((item) => item.menuType?.toLowerCase() === menuType.toLowerCase());
   }
 
-  // Exclude sold-out items
-  items = items.filter((item) => !item.soldOut);
+  // Exclude items with empty description (nothing to display)
+  items = items.filter((item) => item.description && item.description.trim().length > 0);
 
   return items;
 }
@@ -175,58 +175,114 @@ function escapeXml(str) {
 
 /**
  * Compose a CLIENT menu slide using menuType-specific template.
- * Template has food border with transparent/white center.
- * Each slide = one menu record showing:
- *   ClientName
- *   MenuType
- *   templateName (menuName) - Rs.costPerPlate
- *   ---
- *   Items from description (comma-separated), listed one below another
+ * Groups ALL templates for a menuType onto one slide using multi-column layout.
+ * 
+ * Layout:
+ *   ClientName (centered)
+ *   MenuType (centered)
+ *   ───────────────────
+ *   [Col 1]              [Col 2]
+ *   TemplateName         TemplateName
+ *   • item1              • item1
+ *   • item2              • item2
  */
-async function composeClientMenuSlide(templatePath, menuRecord, clientName, menuType, outputPath) {
-  const menuName = menuRecord.menuName || "";
-  const price = menuRecord.price || menuRecord.itemPrice || "";
-  const description = menuRecord.description || "";
-  const descItems = description.split(",").map(s => s.trim()).filter(Boolean);
-
+async function composeClientMenuSlide(templatePath, menuRecords, clientName, menuType, outputPath) {
   let svgElements = "";
   const centerX = SLIDE_WIDTH / 2;
-  let currentY = 130;
+  let headerY = 115;
 
-  // Client Name (large, centered)
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="36" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(clientName)}</text>`;
-  currentY += 42;
+  // Header: Client Name
+  svgElements += `<text x="${centerX}" y="${headerY}" font-size="34" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(clientName)}</text>`;
+  headerY += 36;
 
-  // Menu Type
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="24" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuType)}</text>`;
-  currentY += 38;
+  // Header: Menu Type
+  svgElements += `<text x="${centerX}" y="${headerY}" font-size="22" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuType)}</text>`;
+  headerY += 28;
 
-  // Template name + price
-  const priceStr = price && price !== "0" ? ` - Rs.${price}` : "";
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="22" font-weight="bold" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}${escapeXml(priceStr)}</text>`;
-  currentY += 32;
+  // Separator
+  svgElements += `<line x1="${centerX - 200}" y1="${headerY}" x2="${centerX + 200}" y2="${headerY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
+  headerY += 20;
 
-  // Separator line
-  svgElements += `<line x1="${centerX - 180}" y1="${currentY}" x2="${centerX + 180}" y2="${currentY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
-  currentY += 28;
+  const contentStartY = headerY;
+  const maxContentY = 720; // bottom limit for content
 
-  // Description items (listed one below another, max ~12 to fit)
-  const maxItems = Math.min(descItems.length, 12);
-  const fontSize = descItems.length > 8 ? 18 : 22;
-  const lineHeight = descItems.length > 8 ? 28 : 34;
+  if (menuRecords.length === 1) {
+    // Single template: centered layout
+    const rec = menuRecords[0];
+    const menuName = rec.menuName || "";
+    const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
 
-  for (let i = 0; i < maxItems; i++) {
-    svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize}" font-weight="normal" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
-    currentY += lineHeight;
-  }
+    let y = contentStartY;
+    svgElements += `<text x="${centerX}" y="${y}" font-size="22" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+    y += 30;
 
-  if (descItems.length > maxItems) {
-    svgElements += `<text x="${centerX}" y="${currentY}" font-size="16" font-weight="normal" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+    const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 26));
+    const fontSize = maxItems > 10 ? 17 : 20;
+    const lh = maxItems > 10 ? 24 : 28;
+
+    for (let i = 0; i < maxItems; i++) {
+      svgElements += `<text x="${centerX}" y="${y}" font-size="${fontSize}" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
+      y += lh;
+    }
+    if (descItems.length > maxItems) {
+      svgElements += `<text x="${centerX}" y="${y}" font-size="15" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+    }
+  } else if (menuRecords.length === 2) {
+    // 2 templates: 2-column layout
+    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
+    for (let col = 0; col < 2; col++) {
+      const rec = menuRecords[col];
+      const menuName = rec.menuName || "";
+      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
+
+      let y = contentStartY;
+      svgElements += `<text x="${colX[col]}" y="${y}" font-size="19" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+      y += 28;
+
+      const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 24));
+      for (let i = 0; i < maxItems; i++) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
+        y += 24;
+      }
+      if (descItems.length > maxItems) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="14" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+      }
+    }
+  } else {
+    // 3-4+ templates: 2-column grid layout, templates distributed across columns
+    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
+    const colY = [contentStartY, contentStartY];
+
+    for (let i = 0; i < menuRecords.length; i++) {
+      // Place in the column with less Y usage
+      const col = colY[0] <= colY[1] ? 0 : 1;
+      const rec = menuRecords[i];
+      const menuName = rec.menuName || "";
+      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
+
+      let y = colY[col];
+      if (y >= maxContentY) continue;
+
+      svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+      y += 24;
+
+      const availLines = Math.floor((maxContentY - y) / 22);
+      const maxItems = Math.min(descItems.length, availLines - 1);
+      for (let j = 0; j < maxItems; j++) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="15" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[j])}</text>`;
+        y += 22;
+      }
+      if (descItems.length > maxItems) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="13" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+        y += 22;
+      }
+      y += 12; // gap before next template
+      colY[col] = y;
+    }
   }
 
   const svg = `<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${svgElements}</svg>`;
 
-  // Flatten template (handle transparency by compositing on white first)
   await sharp({ create: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
     .composite([
       { input: await sharp(templatePath).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toBuffer(), top: 0, left: 0 },
@@ -368,26 +424,32 @@ async function generateVideo(reqBody) {
   await sharp(slide1Path).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toFile(openingPath);
   slides.push({ imagePath: openingPath, duration: 5 });
 
-  // ── Client slides (per menuType from client record) ──
+  // ── Client slides (grouped by menuType across all clients) ──
+  // Collect all menu records grouped by menuType
+  const menuTypeGroups = {}; // { menuType: [records] }
+  let clientName = "";
   for (const client of clients) {
+    if (!clientName) clientName = client.clientName || "";
     const menuTypes = client.menuTypes || [];
-    if (menuTypes.length === 0) continue;
-
     for (const menuType of menuTypes) {
       const menus = await getDailyMenus(client.clientID, date, menuType);
       if (menus.length === 0) continue;
-
-      // Get the appropriate template for this menuType
-      const slideKey = MENU_TYPE_SLIDE_MAP[menuType.toLowerCase()] || "LunchSlide";
-      const templatePath = await downloadSlideFromCdn(slideKey);
-
-      // One slide per menu record (each record = one meal template with description items)
-      for (const menuRecord of menus) {
-        const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-        await composeClientMenuSlide(templatePath, menuRecord, client.clientName || "", menuType, outputPath);
-        slides.push({ imagePath: outputPath, duration: 6 });
-      }
+      const key = menuType.toLowerCase();
+      if (!menuTypeGroups[key]) menuTypeGroups[key] = { menuType, records: [] };
+      menuTypeGroups[key].records.push(...menus);
     }
+  }
+
+  // Generate one slide per menuType with all templates grouped
+  for (const key of Object.keys(menuTypeGroups)) {
+    const { menuType, records } = menuTypeGroups[key];
+    const slideKey = MENU_TYPE_SLIDE_MAP[key] || "Lunch_DinnerSlide";
+    const templatePath = await downloadSlideFromCdn(slideKey);
+
+    const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
+    await composeClientMenuSlide(templatePath, records, clientName, menuType, outputPath);
+    slides.push({ imagePath: outputPath, duration: 6 });
+  }
   }
 
   // ── Counter slides (QSR menus) ──

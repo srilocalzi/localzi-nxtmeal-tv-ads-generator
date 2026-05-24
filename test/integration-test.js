@@ -97,7 +97,8 @@ async function getDailyMenus(clientID, date, menuType) {
     );
   }
 
-  items = items.filter((item) => !item.soldOut);
+  // Exclude items with empty description (nothing to display on slide)
+  items = items.filter((item) => item.description && item.description.trim().length > 0);
   return items;
 }
 
@@ -143,48 +144,93 @@ function escapeXml(str) {
 }
 
 /**
- * Compose a CLIENT menu slide with centered text on menuType-specific template.
- * Each slide = one menu record showing menuName, price, and description items.
+ * Compose a CLIENT menu slide grouping ALL templates for a menuType.
+ * Uses multi-column layout for multiple templates.
  */
-async function composeClientMenuSlide(templatePath, menuRecord, clientName, menuType, outputPath) {
-  const menuName = menuRecord.menuName || "";
-  const price = menuRecord.price || menuRecord.itemPrice || "";
-  const description = menuRecord.description || "";
-  const descItems = description.split(",").map(s => s.trim()).filter(Boolean);
-
+async function composeClientMenuSlide(templatePath, menuRecords, clientName, menuType, outputPath) {
   let svgElements = "";
   const centerX = SLIDE_WIDTH / 2;
-  let currentY = 130;
+  let headerY = 115;
 
-  // Client Name
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="36" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(clientName)}</text>`;
-  currentY += 42;
+  svgElements += `<text x="${centerX}" y="${headerY}" font-size="34" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(clientName)}</text>`;
+  headerY += 36;
+  svgElements += `<text x="${centerX}" y="${headerY}" font-size="22" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuType)}</text>`;
+  headerY += 28;
+  svgElements += `<line x1="${centerX - 200}" y1="${headerY}" x2="${centerX + 200}" y2="${headerY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
+  headerY += 20;
 
-  // Menu Type
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="24" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuType)}</text>`;
-  currentY += 38;
+  const contentStartY = headerY;
+  const maxContentY = 720;
 
-  // Template name + price
-  const priceStr = price && price !== "0" ? ` - Rs.${price}` : "";
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="22" font-weight="bold" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}${escapeXml(priceStr)}</text>`;
-  currentY += 32;
+  if (menuRecords.length === 1) {
+    const rec = menuRecords[0];
+    const menuName = rec.menuName || "";
+    const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
 
-  // Separator
-  svgElements += `<line x1="${centerX - 180}" y1="${currentY}" x2="${centerX + 180}" y2="${currentY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
-  currentY += 28;
+    let y = contentStartY;
+    svgElements += `<text x="${centerX}" y="${y}" font-size="22" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+    y += 30;
 
-  // Description items listed one below another
-  const maxItems = Math.min(descItems.length, 12);
-  const fontSize = descItems.length > 8 ? 18 : 22;
-  const lineHeight = descItems.length > 8 ? 28 : 34;
+    const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 26));
+    const fontSize = maxItems > 10 ? 17 : 20;
+    const lh = maxItems > 10 ? 24 : 28;
 
-  for (let i = 0; i < maxItems; i++) {
-    svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize}" font-weight="normal" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
-    currentY += lineHeight;
-  }
+    for (let i = 0; i < maxItems; i++) {
+      svgElements += `<text x="${centerX}" y="${y}" font-size="${fontSize}" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
+      y += lh;
+    }
+    if (descItems.length > maxItems) {
+      svgElements += `<text x="${centerX}" y="${y}" font-size="15" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+    }
+  } else if (menuRecords.length === 2) {
+    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
+    for (let col = 0; col < 2; col++) {
+      const rec = menuRecords[col];
+      const menuName = rec.menuName || "";
+      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
 
-  if (descItems.length > maxItems) {
-    svgElements += `<text x="${centerX}" y="${currentY}" font-size="16" font-weight="normal" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+      let y = contentStartY;
+      svgElements += `<text x="${colX[col]}" y="${y}" font-size="19" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+      y += 28;
+
+      const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 24));
+      for (let i = 0; i < maxItems; i++) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
+        y += 24;
+      }
+      if (descItems.length > maxItems) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="14" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+      }
+    }
+  } else {
+    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
+    const colY = [contentStartY, contentStartY];
+
+    for (let i = 0; i < menuRecords.length; i++) {
+      const col = colY[0] <= colY[1] ? 0 : 1;
+      const rec = menuRecords[i];
+      const menuName = rec.menuName || "";
+      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
+
+      let y = colY[col];
+      if (y >= maxContentY) continue;
+
+      svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
+      y += 24;
+
+      const availLines = Math.floor((maxContentY - y) / 22);
+      const maxItems = Math.min(descItems.length, availLines - 1);
+      for (let j = 0; j < maxItems; j++) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="15" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[j])}</text>`;
+        y += 22;
+      }
+      if (descItems.length > maxItems) {
+        svgElements += `<text x="${colX[col]}" y="${y}" font-size="13" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
+        y += 22;
+      }
+      y += 12;
+      colY[col] = y;
+    }
   }
 
   const svg = `<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${svgElements}</svg>`;
@@ -331,28 +377,34 @@ async function main() {
   slides.push({ imagePath: openingPath, duration: 5 });
   console.log(`   [${slides.length}] Opening (5s)`);
 
-  // Client slides - per menuType
+  // Client slides - one slide per menuType with all templates grouped
+  const menuTypeGroups = {};
+  let mainClientName = "";
   for (const client of clients) {
+    if (!mainClientName) mainClientName = client.clientName || "";
     const menuTypes = client.menuTypes || [];
     for (const mt of menuTypes) {
       const menus = (clientMenuData[client.clientID] || {})[mt] || [];
       if (menus.length === 0) continue;
-
-      const slideKey = MENU_TYPE_SLIDE_MAP[mt.toLowerCase()] || "Lunch_DinnerSlide";
-      const templatePath = templatePaths[slideKey];
-      if (!templatePath) {
-        console.log(`   SKIP ${client.clientName} [${mt}] - template not available`);
-        continue;
-      }
-
-      for (const menuRecord of menus) {
-        const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-        await composeClientMenuSlide(templatePath, menuRecord, client.clientName || "", mt, outputPath);
-        slides.push({ imagePath: outputPath, duration: 6 });
-        const descCount = (menuRecord.description || "").split(",").filter(Boolean).length;
-        console.log(`   [${slides.length}] ${client.clientName} [${mt}] "${menuRecord.menuName}" (${descCount} items) (6s)`);
-      }
+      const key = mt.toLowerCase();
+      if (!menuTypeGroups[key]) menuTypeGroups[key] = { menuType: mt, records: [] };
+      menuTypeGroups[key].records.push(...menus);
     }
+  }
+
+  for (const key of Object.keys(menuTypeGroups)) {
+    const { menuType, records } = menuTypeGroups[key];
+    const slideKey = MENU_TYPE_SLIDE_MAP[key] || "Lunch_DinnerSlide";
+    const templatePath = templatePaths[slideKey];
+    if (!templatePath) {
+      console.log(`   SKIP [${menuType}] - template not available`);
+      continue;
+    }
+
+    const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
+    await composeClientMenuSlide(templatePath, records, mainClientName, menuType, outputPath);
+    slides.push({ imagePath: outputPath, duration: 6 });
+    console.log(`   [${slides.length}] ${mainClientName} [${menuType}] - ${records.length} templates grouped (6s)`);
   }
 
   // Counter slides
