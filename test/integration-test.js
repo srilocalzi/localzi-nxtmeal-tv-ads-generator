@@ -30,7 +30,7 @@ const DAILY_MENUS_TABLE = "localzi-nxtmeal-octopus-daily-menus-prod";
 const QSR_MENUS_TABLE = "localzi-nxtmeal-qsr-menus-prod";
 
 // Input
-const SUB_LOCATION_ID = "17705327354499446";
+const SUB_LOCATION_ID = "17705347457104282";
 
 // Tomorrow's date
 const TOMORROW = (() => {
@@ -45,6 +45,19 @@ const MENU_TYPE_SLIDE_MAP = {
   lunch: "Lunch_DinnerSlide",
   snacks: "SnacksSlide",
   dinner: "Lunch_DinnerSlide",
+};
+
+// Map counter names to their slide template filenames on CDN
+const COUNTER_SLIDE_MAP = {
+  "chopstix co": "ChopstixSlide",
+  "chopstix co.": "ChopstixSlide",
+  "dakshin delight": "DakshinDelightSlide",
+  "flavour hub": "FlavourHubSlide",
+  "grab & go": "Grab&GoSlide",
+  "grab and go": "Grab&GoSlide",
+  "north plate": "NorthPlateSlide",
+  "beans & bowls": "Beans&Bowls",
+  "beans and bowls": "Beans&Bowls",
 };
 
 const db = new AWS.DynamoDB.DocumentClient({ region: "ap-south-1" });
@@ -244,51 +257,47 @@ async function composeClientMenuSlide(templatePath, menuRecords, clientName, men
     .toFile(outputPath);
 }
 
-async function composeCounterMenuSlide(counter, menuItems, outputPath) {
-  const items = menuItems.slice(0, 6);
+async function composeCounterMenuSlide(counter, menuItems, templatePath, outputPath) {
+  const items = menuItems.slice(0, 8);
   const counterName = counter.counterName || counter.clientName || "";
-  const composites = [];
-
-  const logoUrl = counter.s3Url || counter.bannerImage || "";
-  if (logoUrl) {
-    const logoPath = path.join(TMP_DIR, `logo_${counter.clientID}.png`);
-    try {
-      if (!fs.existsSync(logoPath)) {
-        await downloadFile(logoUrl, logoPath);
-      }
-      const logoBuffer = await sharp(logoPath)
-        .resize(150, 150, { fit: "inside", background: { r: 255, g: 255, b: 255, alpha: 0 } })
-        .png()
-        .toBuffer();
-      composites.push({ input: logoBuffer, top: 25, left: 40 });
-    } catch (e) {
-      console.log(`   (logo failed: ${e.message})`);
-    }
-  }
 
   let svgElements = "";
-  svgElements += `<text x="220" y="80" font-size="36" font-weight="bold" fill="#222222" font-family="Arial, Helvetica, sans-serif">${escapeXml(counterName)}</text>`;
-  svgElements += `<line x1="40" y1="180" x2="1326" y2="180" stroke="#E0E0E0" stroke-width="2"/>`;
+  const centerX = SLIDE_WIDTH / 2;
+  let currentY = 130;
 
-  items.forEach((item, idx) => {
-    const col = idx < 3 ? 0 : 1;
-    const row = idx < 3 ? idx : idx - 3;
-    const baseX = col === 0 ? 80 : 720;
-    const baseY = 230 + row * 160;
+  // Counter Name
+  svgElements += `<text x="${centerX}" y="${currentY}" font-size="34" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(counterName)}</text>`;
+  currentY += 36;
+
+  // Separator
+  svgElements += `<line x1="${centerX - 180}" y1="${currentY}" x2="${centerX + 180}" y2="${currentY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
+  currentY += 28;
+
+  // Menu items with prices
+  const fontSize = items.length > 6 ? 18 : 22;
+  const lineHeight = items.length > 6 ? 26 : 32;
+  const priceGap = items.length > 6 ? 22 : 26;
+
+  items.forEach((item) => {
     const name = item.itemName || item.menuName || "";
     const price = item.itemPrice || item.price || "";
 
-    svgElements += `<text x="${baseX}" y="${baseY}" font-size="28" font-weight="bold" fill="#222222" font-family="Arial, Helvetica, sans-serif">${escapeXml(name)}</text>`;
-    svgElements += `<text x="${baseX}" y="${baseY + 40}" font-size="22" font-weight="normal" fill="#E65100" font-family="Arial, Helvetica, sans-serif">Rs.${escapeXml(String(price))}</text>`;
+    svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize}" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(name)}</text>`;
+    currentY += priceGap;
+
+    if (price) {
+      svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize - 4}" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">Rs.${escapeXml(String(price))}</text>`;
+    }
+    currentY += lineHeight;
   });
 
   const svg = `<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${svgElements}</svg>`;
-  composites.push({ input: Buffer.from(svg), top: 0, left: 0 });
 
-  await sharp({
-    create: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
-  })
-    .composite(composites)
+  await sharp({ create: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
+    .composite([
+      { input: await sharp(templatePath).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toBuffer(), top: 0, left: 0 },
+      { input: Buffer.from(svg), top: 0, left: 0 },
+    ])
     .png()
     .toFile(outputPath);
 }
@@ -355,7 +364,17 @@ async function main() {
   console.log("\n4. Downloading slide templates...");
   const templatePaths = {};
   const templatesToDownload = ["Slide 1", "Slide 9", "Slide 10", "BreakfastSlide", "Lunch_DinnerSlide", "SnacksSlide"];
-  for (const name of templatesToDownload) {
+
+  // Also download counter-specific templates
+  const counterTemplateNames = new Set();
+  for (const counter of counters) {
+    const name = (counter.counterName || counter.clientName || "").toLowerCase().trim();
+    const slideKey = COUNTER_SLIDE_MAP[name];
+    if (slideKey) counterTemplateNames.add(slideKey);
+  }
+  const allTemplates = [...templatesToDownload, ...counterTemplateNames];
+
+  for (const name of allTemplates) {
     const localPath = path.join(TMP_DIR, `${name}.png`);
     try {
       await downloadFile(`${CDN_PREFIX}/${name}.png`, localPath);
@@ -412,10 +431,20 @@ async function main() {
     const menus = counterMenuData[counter.clientID] || [];
     if (menus.length === 0) continue;
 
-    for (let i = 0; i < menus.length; i += 6) {
-      const chunk = menus.slice(i, i + 6);
+    const counterName = (counter.counterName || counter.clientName || "").toLowerCase().trim();
+    const slideKey = COUNTER_SLIDE_MAP[counterName];
+    let counterTemplatePath;
+    if (slideKey && templatePaths[slideKey]) {
+      counterTemplatePath = templatePaths[slideKey];
+    } else {
+      counterTemplatePath = templatePaths["Lunch_DinnerSlide"];
+      console.log(`   (no template for counter "${counterName}", using fallback)`);
+    }
+
+    for (let i = 0; i < menus.length; i += 8) {
+      const chunk = menus.slice(i, i + 8);
       const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-      await composeCounterMenuSlide(counter, chunk, outputPath);
+      await composeCounterMenuSlide(counter, chunk, counterTemplatePath, outputPath);
       slides.push({ imagePath: outputPath, duration: 6 });
       console.log(`   [${slides.length}] ${counter.counterName || counter.clientName} items ${i + 1}-${i + chunk.length} (6s)`);
     }
