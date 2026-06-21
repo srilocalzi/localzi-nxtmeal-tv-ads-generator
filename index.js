@@ -25,13 +25,17 @@ const handleGet = async (event) => {
   const querystring = event.params?.querystring || {};
   log.info("GET /tv-ads-generator", { params: Object.keys(querystring) });
 
+  if (querystring.action === "config") {
+    return services.getAdConfig();
+  }
+
   if (querystring.subLocationID) {
     // Get generation history
     const history = await services.getGenerationHistory(querystring.subLocationID);
     return history;
   }
 
-  return { message: "Provide subLocationID to get generation history" };
+  return { message: "Use action=config or provide subLocationID to get generation history" };
 };
 
 const routes = {

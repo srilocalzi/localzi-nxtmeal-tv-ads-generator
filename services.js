@@ -10,49 +10,30 @@ const {
   getDailyMenusTableName,
   getQsrMenusTableName,
   getTvAdsTableName,
-  getSlidesBucketName,
   getOutputBucketName,
   getCdnBaseUrl,
 } = require("./utils");
+const {
+  SLIDE_WIDTH,
+  SLIDE_HEIGHT,
+  DURATIONS,
+  ITEMS_PER_CLIENT_SLIDE,
+  ITEMS_PER_COUNTER_SLIDE,
+  getIntroSlides,
+  getOutroSlides,
+  getThemeColors,
+  getCounterNameOptions,
+} = require("./slideConfig");
 
 const db = new AWS.DynamoDB.DocumentClient({ region: "ap-south-1" });
 const s3 = new AWS.S3({ region: "ap-south-1" });
 
 const TMP_DIR = "/tmp/tv-ads";
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "/opt/bin/ffmpeg";
-const SLIDE_WIDTH = 1366;
-const SLIDE_HEIGHT = 768;
 const CDN_BASE = getCdnBaseUrl();
 const SLIDES_CDN_PREFIX = `${CDN_BASE}/nxtmeal`;
+const DEFAULT_THEME_COLOR = "#286C39";
 
-// Map menuType to slide template filename
-const MENU_TYPE_SLIDE_MAP = {
-  breakfast: "BreakfastSlide",
-  lunch: "Lunch_DinnerSlide",
-  snacks: "SnacksSlide",
-  dinner: "Lunch_DinnerSlide",
-};
-
-// Map counter names to their slide template filenames on CDN
-const COUNTER_SLIDE_MAP = {
-  "chopstix co": "ChopstixSlide",
-  "chopstix co.": "ChopstixSlide",
-  "dakshin delight": "DakshinDelightSlide",
-  "flavour hub": "FlavourHubSlide",
-  "grab & go": "Grab&GoSlide",
-  "grab and go": "Grab&GoSlide",
-  "north plate": "NorthPlateSlide",
-  "beans & bowls": "Beans&Bowls",
-  "beans and bowls": "Beans&Bowls",
-};
-
-// ══════════════════════════════════════════
-// DATA FETCHING
-// ══════════════════════════════════════════
-
-/**
- * Get all clients AND counters for a subLocationID.
- */
 async function getEntitiesForSubLocation(subLocationID) {
   const params = {
     TableName: getClientsTableName(),
@@ -64,15 +45,12 @@ async function getEntitiesForSubLocation(subLocationID) {
   const result = await db.query(params).promise();
   const items = result.Items || [];
 
-  const counters = items.filter((i) => i.type === "COUNTER");
-  const clients = items.filter((i) => i.type !== "COUNTER");
-
-  return { clients, counters };
+  return {
+    counters: items.filter((item) => item.type === "COUNTER"),
+    clients: items.filter((item) => item.type !== "COUNTER"),
+  };
 }
 
-/**
- * Get daily menu items for a CLIENT on a specific date + menuType.
- */
 async function getDailyMenus(clientID, date, menuType) {
   const params = {
     TableName: getDailyMenusTableName(),
@@ -83,28 +61,23 @@ async function getDailyMenus(clientID, date, menuType) {
   const result = await db.query(params).promise();
   let items = result.Items || [];
 
-  // Filter by date
   if (date) {
+    const normalizedDate = date.replace(/\//g, "-");
     items = items.filter((item) => {
       const itemDate = item.date || item.sortKey?.split("#")[0] || "";
-      return itemDate.includes(date.replace(/\//g, "-")) || itemDate.includes(date);
+      return itemDate.includes(normalizedDate) || itemDate.includes(date);
     });
   }
 
-  // Filter by menuType
   if (menuType) {
-    items = items.filter((item) => item.menuType?.toLowerCase() === menuType.toLowerCase());
+    items = items.filter(
+      (item) => (item.menuType || "").toLowerCase() === menuType.toLowerCase()
+    );
   }
 
-  // Exclude items with empty description (nothing to display)
-  items = items.filter((item) => item.description && item.description.trim().length > 0);
-
-  return items;
+  return items.filter((item) => item.description && item.description.trim().length > 0);
 }
 
-/**
- * Get QSR menu items for a COUNTER.
- */
 async function getQsrMenus(clientID) {
   const params = {
     TableName: getQsrMenusTableName(),
@@ -114,27 +87,21 @@ async function getQsrMenus(clientID) {
   };
 
   const result = await db.query(params).promise();
-  let items = result.Items || [];
-  items = items.filter((item) => !item.soldOut);
-  return items;
+  return (result.Items || []).filter((item) => !item.soldOut);
 }
 
-// ══════════════════════════════════════════
-// SLIDE COMPOSITION
-// ══════════════════════════════════════════
-
-/**
- * Download a slide from CDN.
- */
 async function downloadSlideFromCdn(slideName) {
   const localPath = path.join(TMP_DIR, "templates", `${slideName}.png`);
-  if (fs.existsSync(localPath)) return localPath;
+  if (fs.existsSync(localPath)) {
+    return localPath;
+  }
 
   const dir = path.dirname(localPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
 
-  const url = `${SLIDES_CDN_PREFIX}/${slideName}.png`;
-  await downloadFile(url, localPath);
+  await downloadFile(`${SLIDES_CDN_PREFIX}/${slideName}.png`, localPath);
   return localPath;
 }
 
@@ -142,43 +109,35 @@ function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const makeRequest = (requestUrl) => {
       const client = requestUrl.startsWith("https") ? https : require("http");
-      client.get(requestUrl, (response) => {
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          makeRequest(response.headers.location);
-        } else if (response.statusCode !== 200) {
-          reject(new Error(`HTTP ${response.statusCode} for ${url}`));
-        } else {
+      client
+        .get(requestUrl, (response) => {
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            makeRequest(response.headers.location);
+            return;
+          }
+
+          if (response.statusCode !== 200) {
+            reject(new Error(`HTTP ${response.statusCode} for ${url}`));
+            return;
+          }
+
           const file = fs.createWriteStream(destPath);
           response.pipe(file);
-          file.on("finish", () => { file.close(); resolve(destPath); });
+          file.on("finish", () => {
+            file.close();
+            resolve(destPath);
+          });
           file.on("error", reject);
-        }
-      }).on("error", reject);
+        })
+        .on("error", reject);
     };
+
     makeRequest(url);
   });
 }
 
-async function downloadLogo(logoUrl) {
-  if (!logoUrl) return null;
-  const hash = Buffer.from(logoUrl).toString("base64url").slice(0, 20);
-  const localPath = path.join(TMP_DIR, "logos", `${hash}.png`);
-  if (fs.existsSync(localPath)) return localPath;
-
-  const dir = path.dirname(localPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  try {
-    await downloadFile(logoUrl, localPath);
-    return localPath;
-  } catch (err) {
-    log.warn("Failed to download logo", { logoUrl, error: err.message });
-    return null;
-  }
-}
-
-function escapeXml(str) {
-  return String(str)
+function escapeXml(value) {
+  return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -186,197 +145,192 @@ function escapeXml(str) {
     .replace(/'/g, "&apos;");
 }
 
-/**
- * Compose a CLIENT menu slide using menuType-specific template.
- * Groups ALL templates for a menuType onto one slide using multi-column layout.
- * 
- * Layout:
- *   ClientName (centered)
- *   MenuType (centered)
- *   ───────────────────
- *   [Col 1]              [Col 2]
- *   TemplateName         TemplateName
- *   • item1              • item1
- *   • item2              • item2
- */
-async function composeClientMenuSlide(templatePath, menuRecords, clientName, menuType, outputPath) {
-  let svgElements = "";
-  const centerX = SLIDE_WIDTH / 2;
-  let headerY = 115;
-
-  // Header: Client Name
-  svgElements += `<text x="${centerX}" y="${headerY}" font-size="34" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(clientName)}</text>`;
-  headerY += 36;
-
-  // Header: Menu Type
-  svgElements += `<text x="${centerX}" y="${headerY}" font-size="22" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuType)}</text>`;
-  headerY += 28;
-
-  // Separator
-  svgElements += `<line x1="${centerX - 200}" y1="${headerY}" x2="${centerX + 200}" y2="${headerY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
-  headerY += 20;
-
-  const contentStartY = headerY;
-  const maxContentY = 720; // bottom limit for content
-
-  if (menuRecords.length === 1) {
-    // Single template: centered layout
-    const rec = menuRecords[0];
-    const menuName = rec.menuName || "";
-    const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
-
-    let y = contentStartY;
-    svgElements += `<text x="${centerX}" y="${y}" font-size="22" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
-    y += 30;
-
-    const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 26));
-    const fontSize = maxItems > 10 ? 17 : 20;
-    const lh = maxItems > 10 ? 24 : 28;
-
-    for (let i = 0; i < maxItems; i++) {
-      svgElements += `<text x="${centerX}" y="${y}" font-size="${fontSize}" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
-      y += lh;
-    }
-    if (descItems.length > maxItems) {
-      svgElements += `<text x="${centerX}" y="${y}" font-size="15" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
-    }
-  } else if (menuRecords.length === 2) {
-    // 2 templates: 2-column layout
-    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
-    for (let col = 0; col < 2; col++) {
-      const rec = menuRecords[col];
-      const menuName = rec.menuName || "";
-      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
-
-      let y = contentStartY;
-      svgElements += `<text x="${colX[col]}" y="${y}" font-size="19" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
-      y += 28;
-
-      const maxItems = Math.min(descItems.length, Math.floor((maxContentY - y) / 24));
-      for (let i = 0; i < maxItems; i++) {
-        svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[i])}</text>`;
-        y += 24;
-      }
-      if (descItems.length > maxItems) {
-        svgElements += `<text x="${colX[col]}" y="${y}" font-size="14" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
-      }
-    }
-  } else {
-    // 3-4+ templates: 2-column grid layout, templates distributed across columns
-    const colX = [SLIDE_WIDTH * 0.30, SLIDE_WIDTH * 0.70];
-    const colY = [contentStartY, contentStartY];
-
-    for (let i = 0; i < menuRecords.length; i++) {
-      // Place in the column with less Y usage
-      const col = colY[0] <= colY[1] ? 0 : 1;
-      const rec = menuRecords[i];
-      const menuName = rec.menuName || "";
-      const descItems = (rec.description || "").split(",").map(s => s.trim()).filter(Boolean);
-
-      let y = colY[col];
-      if (y >= maxContentY) continue;
-
-      svgElements += `<text x="${colX[col]}" y="${y}" font-size="17" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(menuName)}</text>`;
-      y += 24;
-
-      const availLines = Math.floor((maxContentY - y) / 22);
-      const maxItems = Math.min(descItems.length, availLines - 1);
-      for (let j = 0; j < maxItems; j++) {
-        svgElements += `<text x="${colX[col]}" y="${y}" font-size="15" fill="#444444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(descItems[j])}</text>`;
-        y += 22;
-      }
-      if (descItems.length > maxItems) {
-        svgElements += `<text x="${colX[col]}" y="${y}" font-size="13" fill="#888888" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">+ ${descItems.length - maxItems} more</text>`;
-        y += 22;
-      }
-      y += 12; // gap before next template
-      colY[col] = y;
-    }
+function hexToRgb(hex) {
+  const normalized = String(hex || "").replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    return null;
   }
 
-  const svg = `<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${svgElements}</svg>`;
-
-  await sharp({ create: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
-    .composite([
-      { input: await sharp(templatePath).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toBuffer(), top: 0, left: 0 },
-      { input: Buffer.from(svg), top: 0, left: 0 },
-    ])
-    .png()
-    .toFile(outputPath);
-
-  return outputPath;
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  };
 }
 
-/**
- * Compose a COUNTER menu slide using counter-specific template.
- * Template has food/counter-themed border with center area for text.
- * Shows counter name + menu items with prices, centered.
- */
-async function composeCounterMenuSlide(counter, menuItems, templatePath, outputPath) {
-  const items = menuItems.slice(0, 8);
-  const counterName = counter.counterName || counter.clientName || "";
+function resolveThemeColor(themeColor) {
+  return hexToRgb(themeColor) ? themeColor : DEFAULT_THEME_COLOR;
+}
 
-  let svgElements = "";
-  const centerX = SLIDE_WIDTH / 2;
-  let currentY = 130;
+function getContrastTextColor(hex) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) {
+    return "#FFFFFF";
+  }
 
-  // Counter Name
-  svgElements += `<text x="${centerX}" y="${currentY}" font-size="34" font-weight="bold" fill="#222222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(counterName)}</text>`;
-  currentY += 36;
+  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+  return luminance > 0.62 ? "#1C1C1C" : "#FFFFFF";
+}
 
-  // Separator
-  svgElements += `<line x1="${centerX - 180}" y1="${currentY}" x2="${centerX + 180}" y2="${currentY}" stroke="#CCCCCC" stroke-width="1.5"/>`;
-  currentY += 28;
+function toRgba(hex, alpha) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) {
+    return `rgba(40,108,57,${alpha})`;
+  }
 
-  // Menu items with prices
-  const fontSize = items.length > 6 ? 18 : 22;
-  const lineHeight = items.length > 6 ? 26 : 32;
-  const priceGap = items.length > 6 ? 22 : 26;
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
+}
 
-  items.forEach((item) => {
-    const name = item.itemName || item.menuName || "";
-    const price = item.itemPrice || item.price || "";
+function chunkArray(items, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
 
-    svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize}" font-weight="bold" fill="#333333" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">${escapeXml(name)}</text>`;
-    currentY += priceGap;
+function titleCase(text) {
+  return String(text || "")
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
 
-    if (price) {
-      svgElements += `<text x="${centerX}" y="${currentY}" font-size="${fontSize - 4}" font-weight="normal" fill="#E65100" text-anchor="middle" font-family="Arial, Helvetica, sans-serif">Rs.${escapeXml(String(price))}</text>`;
+function formatPrice(price) {
+  if (price === undefined || price === null || price === "") {
+    return "";
+  }
+
+  return `Rs.${price}`;
+}
+
+function normalizeClientSections(menuRecords) {
+  return menuRecords.map((record) => {
+    const descItems = String(record.description || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const visibleItems = descItems.slice(0, 4);
+
+    if (descItems.length > visibleItems.length) {
+      visibleItems.push(`+ ${descItems.length - visibleItems.length} more`);
     }
-    currentY += lineHeight;
+
+    return {
+      title: record.menuName || record.templateName || "Menu",
+      meta: formatPrice(record.itemPrice || record.price),
+      items: visibleItems,
+    };
+  });
+}
+
+function normalizeCounterSections(menuItems) {
+  return menuItems.map((item) => ({
+    title: item.itemName || item.menuName || "Menu Item",
+    meta: formatPrice(item.itemPrice || item.price),
+    items: [],
+  }));
+}
+
+async function composeThemedMenuSlide(model, outputPath) {
+  const themeColor = resolveThemeColor(model.themeColor);
+  const headerTextColor = getContrastTextColor(themeColor);
+  const cardFill = toRgba(themeColor, 0.08);
+  const cardStroke = toRgba(themeColor, 0.22);
+  const accentFill = toRgba(themeColor, 0.12);
+  const sections = model.sections || [];
+  const columns = sections.length > 3 ? 2 : 1;
+  const rows = Math.max(1, Math.ceil(sections.length / columns));
+  const gridTop = 195;
+  const gridHeight = 498;
+  const gap = 28;
+  const cardWidth = columns === 1 ? 1030 : 496;
+  const cardHeight = Math.max(120, Math.floor((gridHeight - gap * (rows - 1)) / rows));
+  const startX = columns === 1 ? 168 : 171;
+
+  let svg = `
+    <svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" fill="#F7F5F0" />
+      <rect x="0" y="0" width="${SLIDE_WIDTH}" height="146" fill="${themeColor}" />
+      <circle cx="1220" cy="86" r="132" fill="${toRgba(themeColor, 0.22)}" />
+      <circle cx="1095" cy="680" r="120" fill="${accentFill}" />
+      <text x="683" y="76" text-anchor="middle" font-size="40" font-weight="700" letter-spacing="1" fill="${headerTextColor}" font-family="Arial, Helvetica, sans-serif">${escapeXml(model.displayName || "NXT Meal")}</text>
+      <text x="683" y="112" text-anchor="middle" font-size="20" font-weight="500" fill="${headerTextColor}" font-family="Arial, Helvetica, sans-serif">${escapeXml(model.subTitle || "Curated menu highlights")}</text>
+      <line x1="214" y1="154" x2="1152" y2="154" stroke="${cardStroke}" stroke-width="3" stroke-linecap="round" />
+  `;
+
+  sections.forEach((section, index) => {
+    const columnIndex = columns === 1 ? 0 : index % columns;
+    const rowIndex = columns === 1 ? index : Math.floor(index / columns);
+    const cardX = startX + columnIndex * (cardWidth + gap);
+    const cardY = gridTop + rowIndex * (cardHeight + gap);
+    const textX = cardX + 28;
+    let textY = cardY + 40;
+
+    svg += `
+      <rect x="${cardX}" y="${cardY}" rx="24" ry="24" width="${cardWidth}" height="${cardHeight}" fill="${cardFill}" stroke="${cardStroke}" stroke-width="1.5" />
+      <text x="${textX}" y="${textY}" font-size="28" font-weight="700" fill="#1F1F1F" font-family="Arial, Helvetica, sans-serif">${escapeXml(section.title || "")}</text>
+    `;
+
+    if (section.meta) {
+      svg += `
+        <text x="${cardX + cardWidth - 28}" y="${textY}" text-anchor="end" font-size="18" font-weight="700" fill="${themeColor}" font-family="Arial, Helvetica, sans-serif">${escapeXml(section.meta)}</text>
+      `;
+    }
+
+    textY += 20;
+
+    (section.items || []).forEach((item) => {
+      textY += 30;
+      svg += `
+        <text x="${textX}" y="${textY}" font-size="18" font-weight="400" fill="#474747" font-family="Arial, Helvetica, sans-serif">- ${escapeXml(item)}</text>
+      `;
+    });
   });
 
-  const svg = `<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${svgElements}</svg>`;
+  svg += `
+      <text x="171" y="722" font-size="16" font-weight="500" fill="#5A5A5A" font-family="Arial, Helvetica, sans-serif">Freshly prepared for your workplace menu screens</text>
+    </svg>
+  `;
 
-  await sharp({ create: { width: SLIDE_WIDTH, height: SLIDE_HEIGHT, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } })
-    .composite([
-      { input: await sharp(templatePath).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toBuffer(), top: 0, left: 0 },
-      { input: Buffer.from(svg), top: 0, left: 0 },
-    ])
+  await sharp({
+    create: {
+      width: SLIDE_WIDTH,
+      height: SLIDE_HEIGHT,
+      channels: 4,
+      background: { r: 247, g: 245, b: 240, alpha: 1 },
+    },
+  })
+    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
     .png()
     .toFile(outputPath);
 
   return outputPath;
 }
-
-// ══════════════════════════════════════════
-// VIDEO GENERATION
-// ══════════════════════════════════════════
 
 function stitchSlidesToVideo(slides, outputPath) {
   const concatFilePath = path.join(TMP_DIR, "concat.txt");
-  const lines = slides.map((s) => `file '${s.imagePath}'\nduration ${s.duration}`);
+  const lines = slides.map((slide) => `file '${slide.imagePath}'\nduration ${slide.duration}`);
   if (slides.length > 0) {
     lines.push(`file '${slides[slides.length - 1].imagePath}'`);
   }
   fs.writeFileSync(concatFilePath, lines.join("\n"));
 
   const cmd = [
-    FFMPEG_PATH, "-y", "-f concat", "-safe 0",
-    `-i "${concatFilePath}"`,
-    "-vf", `"scale=${SLIDE_WIDTH}:${SLIDE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${SLIDE_WIDTH}:${SLIDE_HEIGHT}:(ow-iw)/2:(oh-ih)/2"`,
-    "-vsync vfr", "-pix_fmt yuv420p", "-c:v libx264", "-preset fast", "-crf 23",
-    `"${outputPath}"`,
+    FFMPEG_PATH,
+    "-y",
+    "-f concat",
+    "-safe 0",
+    `-i \"${concatFilePath}\"`,
+    "-vf",
+    `\"scale=${SLIDE_WIDTH}:${SLIDE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${SLIDE_WIDTH}:${SLIDE_HEIGHT}:(ow-iw)/2:(oh-ih)/2\"`,
+    "-vsync vfr",
+    "-pix_fmt yuv420p",
+    "-c:v libx264",
+    "-preset fast",
+    "-crf 23",
+    `\"${outputPath}\"`,
   ].join(" ");
 
   log.info("Running FFmpeg", { cmd });
@@ -384,133 +338,175 @@ function stitchSlidesToVideo(slides, outputPath) {
   return outputPath;
 }
 
-// ══════════════════════════════════════════
-// MAIN ENTRY POINT
-// ══════════════════════════════════════════
+function buildSelectionDefaults(entities, themeColors) {
+  let themeIndex = 0;
+  const nextColor = () => {
+    const color = themeColors[themeIndex % themeColors.length] || DEFAULT_THEME_COLOR;
+    themeIndex += 1;
+    return color;
+  };
 
-/**
- * Generate TV Ad video.
- *
- * Input: { subLocationID, date }
- *
- * Flow:
- *  1. Fetch clients + counters for subLocation
- *  2. For clients: read menuTypes from client record, fetch daily menus per menuType
- *     → use menuType-specific template (BreakfastSlide, LunchSlide, SnacksSlide)
- *  3. For counters: fetch QSR menus → white bg + logo + items
- *  4. Stitch: Slide 1 → [client menu slides per menuType] → [counter slides] → Slide 9 → Slide 10
- *  5. Upload to S3, return CDN URL
- */
-async function generateVideo(reqBody) {
-  const { subLocationID, date } = reqBody;
+  return [
+    ...entities.clients.map((client) => ({
+      type: "CLIENT",
+      clientID: client.clientID,
+      displayName: client.clientName || "Client",
+      themeColor: nextColor(),
+      menuTypes: client.menuTypes || [],
+    })),
+    ...entities.counters.map((counter) => ({
+      type: "COUNTER",
+      clientID: counter.clientID,
+      displayName: counter.counterName || counter.clientName || "Counter",
+      themeColor: nextColor(),
+    })),
+  ];
+}
 
-  if (!subLocationID || !date) {
-    throw new Error("subLocationID and date are required");
+function ensureSelections(reqBody) {
+  if (Array.isArray(reqBody.selections) && reqBody.selections.length > 0) {
+    return reqBody.selections;
   }
 
-  log.info("Starting video generation", { subLocationID, date });
+  return null;
+}
 
-  // Clean /tmp workspace
-  if (fs.existsSync(TMP_DIR)) fs.rmSync(TMP_DIR, { recursive: true, force: true });
+async function buildSlidesForSelection(selection, date, slideIndexRef) {
+  const selectionType = String(selection.type || "").toUpperCase();
+  const displayName =
+    selection.displayName || selection.clientName || selection.counterName || "NXT Meal";
+  const themeColor = resolveThemeColor(selection.themeColor);
+  const slides = [];
+
+  if (selectionType === "CLIENT") {
+    const menuTypes =
+      Array.isArray(selection.menuTypes) && selection.menuTypes.length > 0
+        ? selection.menuTypes
+        : ["lunch"];
+
+    for (const menuType of menuTypes) {
+      const menuRecords = await getDailyMenus(selection.clientID, date, menuType);
+      if (menuRecords.length === 0) {
+        continue;
+      }
+
+      const chunks = chunkArray(menuRecords, ITEMS_PER_CLIENT_SLIDE);
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const outputPath = path.join(TMP_DIR, `slide_${slideIndexRef.value++}.png`);
+        const slideLabel = `${titleCase(menuType)} Menu${
+          chunks.length > 1 ? ` ${chunkIndex + 1}` : ""
+        }`;
+
+        await composeThemedMenuSlide(
+          {
+            displayName,
+            subTitle: slideLabel,
+            themeColor,
+            sections: normalizeClientSections(chunks[chunkIndex]),
+          },
+          outputPath
+        );
+
+        slides.push({ imagePath: outputPath, duration: DURATIONS.CLIENT_MENU });
+      }
+    }
+
+    return slides;
+  }
+
+  if (selectionType === "COUNTER") {
+    const menuItems = await getQsrMenus(selection.clientID);
+    if (menuItems.length === 0) {
+      return slides;
+    }
+
+    const chunks = chunkArray(menuItems, ITEMS_PER_COUNTER_SLIDE);
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+      const outputPath = path.join(TMP_DIR, `slide_${slideIndexRef.value++}.png`);
+      await composeThemedMenuSlide(
+        {
+          displayName,
+          subTitle: `Counter Menu${chunks.length > 1 ? ` ${chunkIndex + 1}` : ""}`,
+          themeColor,
+          sections: normalizeCounterSections(chunks[chunkIndex]),
+        },
+        outputPath
+      );
+
+      slides.push({ imagePath: outputPath, duration: DURATIONS.COUNTER_MENU });
+    }
+  }
+
+  return slides;
+}
+
+async function appendStaticSlides(slides, slideNames, duration, slideIndexRef) {
+  for (const slideName of slideNames) {
+    const templatePath = await downloadSlideFromCdn(slideName);
+    const outputPath = path.join(TMP_DIR, `slide_${slideIndexRef.value++}.png`);
+    await sharp(templatePath).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toFile(outputPath);
+    slides.push({ imagePath: outputPath, duration });
+  }
+}
+
+async function generateVideo(reqBody) {
+  const { date, kitchenID, subLocationID } = reqBody;
+  const themeColors = getThemeColors();
+
+  if (!date) {
+    throw new Error("date is required");
+  }
+
+  log.info("Starting video generation", {
+    date,
+    kitchenID,
+    subLocationID,
+    requestedSelections: Array.isArray(reqBody.selections) ? reqBody.selections.length : 0,
+  });
+
+  if (fs.existsSync(TMP_DIR)) {
+    fs.rmSync(TMP_DIR, { recursive: true, force: true });
+  }
   fs.mkdirSync(TMP_DIR, { recursive: true });
 
-  // 1. Fetch all entities for this subLocation
-  const { clients, counters } = await getEntitiesForSubLocation(subLocationID);
-  log.info("Fetched entities", { clients: clients.length, counters: counters.length });
-
-  if (clients.length === 0 && counters.length === 0) {
-    throw new Error(`No clients or counters found for subLocation: ${subLocationID}`);
+  let selections = ensureSelections(reqBody);
+  if (!selections && subLocationID) {
+    const entities = await getEntitiesForSubLocation(subLocationID);
+    selections = buildSelectionDefaults(entities, themeColors);
   }
 
-  // 2. Download static slide templates
-  const slide1Path = await downloadSlideFromCdn("Slide 1");
-  const slide9Path = await downloadSlideFromCdn("Slide 9");
-  const slide10Path = await downloadSlideFromCdn("Slide 10");
+  if (!selections || selections.length === 0) {
+    throw new Error("At least one selection is required");
+  }
 
   const slides = [];
-  let slideIndex = 0;
+  const slideIndexRef = { value: 0 };
+  const introSlides = getIntroSlides();
+  const outroSlides = getOutroSlides();
 
-  // ── Slide 1: Opening (static) ──
-  const openingPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-  await sharp(slide1Path).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toFile(openingPath);
-  slides.push({ imagePath: openingPath, duration: 5 });
+  await appendStaticSlides(slides, introSlides, DURATIONS.OPENING, slideIndexRef);
 
-  // ── Client slides (grouped by menuType across all clients) ──
-  // Collect all menu records grouped by menuType
-  const menuTypeGroups = {}; // { menuType: [records] }
-  let clientName = "";
-  for (const client of clients) {
-    if (!clientName) clientName = client.clientName || "";
-    const menuTypes = client.menuTypes || [];
-    for (const menuType of menuTypes) {
-      const menus = await getDailyMenus(client.clientID, date, menuType);
-      if (menus.length === 0) continue;
-      const key = menuType.toLowerCase();
-      if (!menuTypeGroups[key]) menuTypeGroups[key] = { menuType, records: [] };
-      menuTypeGroups[key].records.push(...menus);
+  let renderedSelectionCount = 0;
+  for (const selection of selections) {
+    const selectionSlides = await buildSlidesForSelection(selection, date, slideIndexRef);
+    if (selectionSlides.length > 0) {
+      renderedSelectionCount += 1;
+      slides.push(...selectionSlides);
     }
   }
 
-  // Generate one slide per menuType with all templates grouped
-  for (const key of Object.keys(menuTypeGroups)) {
-    const { menuType, records } = menuTypeGroups[key];
-    const slideKey = MENU_TYPE_SLIDE_MAP[key] || "Lunch_DinnerSlide";
-    const templatePath = await downloadSlideFromCdn(slideKey);
+  await appendStaticSlides(slides, outroSlides, DURATIONS.PARTY_ORDERS, slideIndexRef);
 
-    const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-    await composeClientMenuSlide(templatePath, records, clientName, menuType, outputPath);
-    slides.push({ imagePath: outputPath, duration: 6 });
-  }
-  }
-
-  // ── Counter slides (QSR menus with per-counter templates) ──
-  for (const counter of counters) {
-    const menus = await getQsrMenus(counter.clientID);
-    if (menus.length === 0) continue;
-
-    // Get counter-specific template
-    const counterName = (counter.counterName || counter.clientName || "").toLowerCase().trim();
-    const slideKey = COUNTER_SLIDE_MAP[counterName];
-    let templatePath;
-    if (slideKey) {
-      templatePath = await downloadSlideFromCdn(slideKey);
-    } else {
-      // Fallback: use Lunch_DinnerSlide if no specific template
-      templatePath = await downloadSlideFromCdn("Lunch_DinnerSlide");
-      log.warn("No counter template found", { counterName });
-    }
-
-    for (let i = 0; i < menus.length; i += 8) {
-      const chunk = menus.slice(i, i + 8);
-      const outputPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-      await composeCounterMenuSlide(counter, chunk, templatePath, outputPath);
-      slides.push({ imagePath: outputPath, duration: 6 });
-    }
-  }
-
-  // ── Slide 9: Party Orders (static) ──
-  const partyPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-  await sharp(slide9Path).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toFile(partyPath);
-  slides.push({ imagePath: partyPath, duration: 5 });
-
-  // ── Slide 10: Download App (static) ──
-  const appPath = path.join(TMP_DIR, `slide_${slideIndex++}.png`);
-  await sharp(slide10Path).resize(SLIDE_WIDTH, SLIDE_HEIGHT).png().toFile(appPath);
-  slides.push({ imagePath: appPath, duration: 5 });
-
-  if (slides.length <= 3) {
+  if (slides.length <= introSlides.length + outroSlides.length) {
     throw new Error("No menu content found to generate video");
   }
 
-  log.info("Generated slides", { count: slides.length });
-
-  // 3. Stitch into MP4
-  const videoFileName = `tv-ad-${subLocationID}-${date.replace(/\//g, "-")}-${Date.now()}.mp4`;
+  const recordKey = kitchenID || subLocationID || "manual";
+  const videoFileName = `tv-ad-${recordKey.replace(/[^a-zA-Z0-9-_]/g, "-")}-${date.replace(/\//g, "-")}-${Date.now()}.mp4`;
   const videoLocalPath = path.join(TMP_DIR, videoFileName);
   stitchSlidesToVideo(slides, videoLocalPath);
 
-  // 4. Upload to S3
-  const s3Key = `videos/${subLocationID}/${videoFileName}`;
+  const s3Key = `videos/${recordKey}/${videoFileName}`;
   const videoBuffer = fs.readFileSync(videoLocalPath);
   await s3
     .putObject({
@@ -522,30 +518,37 @@ async function generateVideo(reqBody) {
     })
     .promise();
 
-  // 5. Generate URL + save record
-  const videoUrl = `${CDN_BASE}/tv-ads/${s3Key}`;
+  const generatedAt = new Date().toISOString();
   const record = {
-    subLocationID,
-    generatedAt: new Date().toISOString(),
-    videoUrl,
+    subLocationID: recordKey,
+    generatedAt,
+    videoUrl: `${CDN_BASE}/tv-ads/${s3Key}`,
     s3Key,
     date,
-    clientCount: clients.length,
-    counterCount: counters.length,
+    selectionCount: selections.length,
+    renderedSelectionCount,
     slideCount: slides.length,
     status: "COMPLETED",
   };
-  await db.put({ TableName: getTvAdsTableName(), Item: record }).promise();
+
+  try {
+    await db.put({ TableName: getTvAdsTableName(), Item: record }).promise();
+  } catch (error) {
+    log.warn("Failed to save generation history", {
+      recordKey,
+      error: error.message,
+    });
+  }
 
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
 
   return {
-    videoUrl,
+    videoUrl: record.videoUrl,
     s3Key,
     slideCount: slides.length,
-    clientCount: clients.length,
-    counterCount: counters.length,
-    generatedAt: record.generatedAt,
+    selectionCount: selections.length,
+    renderedSelectionCount,
+    generatedAt,
   };
 }
 
@@ -561,10 +564,20 @@ async function getGenerationHistory(subLocationID) {
   return result.Items || [];
 }
 
+async function getAdConfig() {
+  return {
+    themeColors: getThemeColors(),
+    counterNames: getCounterNameOptions(),
+    introSlides: getIntroSlides(),
+    outroSlides: getOutroSlides(),
+  };
+}
+
 module.exports = {
   generateVideo,
   getGenerationHistory,
   getEntitiesForSubLocation,
   getDailyMenus,
   getQsrMenus,
+  getAdConfig,
 };

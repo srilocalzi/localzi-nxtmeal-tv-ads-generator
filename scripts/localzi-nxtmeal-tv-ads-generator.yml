@@ -38,6 +38,26 @@ Parameters:
         Description: CloudFront CDN base URL
         Default: https://d2nahbmqd5vvug.cloudfront.net
 
+    IntroSlides:
+        Type: String
+        Description: Comma-separated intro slide asset names from CDN
+        Default: Slide 1
+
+    OutroSlides:
+        Type: String
+        Description: Comma-separated outro slide asset names from CDN
+        Default: Slide 9,Slide 10
+
+    ThemeColors:
+        Type: String
+        Description: Comma-separated list of hex colors available to the ads UI
+        Default: '#F6D233,#286C39,#F46C16,#D52516,#943E96,#3A4B9E,#0C3F38'
+
+    CounterNameOptions:
+        Type: String
+        Description: Comma-separated display-name suggestions for counters in the ads UI
+        Default: Dakshin Delight,FlavourHub,Grab & Go,North Plate,Beans & Bowls
+
     FfmpegLayerArn:
         Type: String
         Description: ARN of the FFmpeg Lambda Layer
@@ -197,6 +217,10 @@ Resources:
                     ENVIRONMENT: !If [IsPROD, "PRODUCTION", "DEVELOPMENT"]
                     CDN_BASE_URL: !Ref CdnBaseUrl
                     FFMPEG_PATH: /opt/bin/ffmpeg
+                    INTRO_SLIDES: !Ref IntroSlides
+                    OUTRO_SLIDES: !Ref OutroSlides
+                    THEME_COLORS: !Ref ThemeColors
+                    COUNTER_NAME_OPTIONS: !Ref CounterNameOptions
             Code:
                 S3Bucket: !If
                     - IsPROD
